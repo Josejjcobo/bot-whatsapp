@@ -56,6 +56,8 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         with open(input_path, 'wb') as f:
             f.write(r.content)
         
+        print(f"📥 Archivo descargado: {nombre_original}")
+        
         # 2. Convertir usando CloudConvert (DOCX a PDF)
         api = cloudconvert.Api(api_key=CC_API_KEY)
         process = api.convert({
@@ -70,9 +72,11 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         process.wait()
         process.download(pdf_path)
         
+        print(f"✅ Conversión completada: {pdf_filename}")
+        
         # 3. Generar link de descarga
         link = f"{BASE_URL}/download/{pdf_filename}"
-        enviar_mensaje_texto(telefono, f"✅ ¡Conversión lista!\nDescarga aquí: {link}\n(El link expirará en 5 minutos)")
+        enviar_mensaje_texto(telefono, f"✅ ¡Conversión lista!\n📄 {pdf_filename}\n🔗 {link}\n⏰ El link expirará en 5 minutos")
 
         # 4. Lanzar hilos de borrado
         threading.Thread(target=programar_borrado, args=(input_path,)).start()
@@ -80,7 +84,7 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
 
     except Exception as e:
         print(f"❌ Error en conversión: {e}")
-        enviar_mensaje_texto(telefono, f"❌ Error en el proceso: {str(e)}")
+        enviar_mensaje_texto(telefono, f"❌ Error: {str(e)}")
 
 @app.route('/webhook', methods=['GET'])
 def verificar_token():
@@ -113,34 +117,63 @@ def recibir_notificacion():
                 if len(cuerpo.split()) > MAX_WORDS:
                     enviar_mensaje_texto(remitente, f"⚠️ El mensaje es muy largo. Máximo {MAX_WORDS} palabras.")
                 else:
-                    enviar_mensaje_texto(remitente, "¡Hola! Soy tu bot conversor. Envíame un archivo .docx para empezar.")
+                    # NUEVO MENSAJE DE BIENVENIDA
+                    enviar_mensaje_texto(remitente, "🤖 *¡Hola! Soy tu bot conversor PDFMagic*\n\n📄 Envíame cualquier archivo WORD (.docx) y lo convertiré automáticamente a PDF.\n\n⚡ Sin registros, sin clics, sin complicaciones.\n\n🔒 Tus archivos se eliminan después de 5 minutos.\n\n✨ ¡Solo envía tu documento y yo hago el resto!")
                 print("✅ Respuesta enviada")
 
             # Mensaje con documento
             elif 'document' in mensaje:
                 doc = mensaje['document']
-                print(f"📄 Documento: {doc['filename']} ({doc['file_size']} bytes)")
                 
-                if doc['file_size'] > MAX_FILE_SIZE:
-                    enviar_mensaje_texto(remitente, "❌ El archivo pesa más de 10 MB.")
+                # Mostrar todo el documento para depuración
+                print(f"📄 Documento recibido: {doc}")
+                
+                # Obtener el tamaño de forma segura (puede venir en diferentes campos)
+                file_size = 0
+                if 'file_size' in doc:
+                    file_size = doc['file_size']
+                elif 'size' in doc:
+                    file_size = doc['size']
+                
+                # Obtener el nombre del archivo
+                filename = doc.get('filename', 'documento.docx')
+                
+                print(f"📄 Archivo: {filename}, Tamaño: {file_size} bytes")
+                
+                # Verificar límite de tamaño (si tenemos el tamaño)
+                if file_size > 0 and file_size > MAX_FILE_SIZE:
+                    enviar_mensaje_texto(remitente, f"❌ El archivo pesa más de 10 MB. Pesa {file_size // (1024*1024)} MB")
                 else:
-                    # Obtener la URL de descarga del archivo
-                    file_data = requests.get(
-                        f"https://graph.facebook.com/v18.0/{doc['id']}", 
-                        headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}
-                    ).json()
-                    
-                    enviar_mensaje_texto(remitente, "⏳ Recibido. Estoy convirtiendo tu archivo...")
-                    
-                    threading.Thread(
-                        target=procesar_y_convertir, 
-                        args=(file_data['url'], doc['filename'], remitente)
-                    ).start()
-                print("✅ Conversión iniciada")
+                    try:
+                        # Obtener la URL de descarga del archivo desde la API de Meta
+                        file_data = requests.get(
+                            f"https://graph.facebook.com/v18.0/{doc['id']}", 
+                            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}
+                        ).json()
+                        
+                        print(f"📥 Datos del archivo: {file_data}")
+                        
+                        if 'url' in file_data:
+                            enviar_mensaje_texto(remitente, "⏳ ¡Recibido! Estoy convirtiendo tu archivo a PDF...\n\n🔄 Procesando...")
+                            threading.Thread(
+                                target=procesar_y_convertir, 
+                                args=(file_data['url'], filename, remitente)
+                            ).start()
+                        else:
+                            print(f"❌ Error: No se encontró URL en la respuesta: {file_data}")
+                            enviar_mensaje_texto(remitente, "❌ No se pudo obtener el archivo. Intenta de nuevo.")
+                    except Exception as e:
+                        print(f"❌ Error al obtener el archivo: {e}")
+                        enviar_mensaje_texto(remitente, f"❌ Error al procesar el archivo: {str(e)}")
+            else:
+                print("📊 Otro tipo de mensaje (ignorado)")
+        
+        elif 'statuses' in entry:
+            # Actualizaciones de estado de mensajes (entregado, leído, etc.)
+            print("📊 Actualización de estado (ignorado)")
         
         else:
-            # Puede ser un status de mensaje entregado, ignorar
-            print("📊 Actualización de estado (ignorado)")
+            print("📊 Otro tipo de evento (ignorado)")
             
     except KeyError as e:
         print(f"❌ Error de clave: {e}. Revisa la estructura del JSON")
