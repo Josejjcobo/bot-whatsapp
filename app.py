@@ -3,7 +3,7 @@ import time
 import threading
 import requests
 import cloudconvert
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, send_from_directory
 
 app = Flask(__name__)
 
@@ -12,6 +12,7 @@ ACCESS_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 PHONE_ID = os.environ.get("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 CC_API_KEY = os.environ.get("CLOUD_CONVERT_API_KEY")
+BASE_URL = os.environ.get("BASE_URL", "https://bot-whatsapp-mljx.onrender.com")
 
 # --- LÍMITES Y RUTAS ---
 MAX_WORDS = 200
@@ -38,7 +39,13 @@ def enviar_mensaje_texto(receptor, texto):
         "type": "text",
         "text": {"body": texto}
     }
-    requests.post(url, headers=headers, json=payload)
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        print(f"📤 Mensaje enviado a {receptor}: {response.status_code}")
+        if response.status_code != 200:
+            print(f"Error respuesta: {response.text}")
+    except Exception as e:
+        print(f"❌ Error al enviar mensaje: {e}")
 
 def procesar_y_convertir(file_url, nombre_original, telefono):
     """Descarga de Meta, convierte en CloudConvert y programa limpieza"""
@@ -63,8 +70,8 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         process.wait()
         process.download(pdf_path)
         
-        # 3. Generar link de descarga (Render)
-        link = f"https://{request.host}/download/{pdf_filename}"
+        # 3. Generar link de descarga
+        link = f"{BASE_URL}/download/{pdf_filename}"
         enviar_mensaje_texto(telefono, f"✅ ¡Conversión lista!\nDescarga aquí: {link}\n(El link expirará en 5 minutos)")
 
         # 4. Lanzar hilos de borrado
@@ -72,54 +79,87 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         threading.Thread(target=programar_borrado, args=(pdf_path,)).start()
 
     except Exception as e:
+        print(f"❌ Error en conversión: {e}")
         enviar_mensaje_texto(telefono, f"❌ Error en el proceso: {str(e)}")
 
 @app.route('/webhook', methods=['GET'])
 def verificar_token():
-    # Validación obligatoria para configurar el Webhook en Meta
+    """Verificación del webhook por Meta"""
     if request.args.get("hub.verify_token") == VERIFY_TOKEN:
         return request.args.get("hub.challenge"), 200
     return "Error de validación", 403
 
 @app.route('/webhook', methods=['POST'])
 def recibir_notificacion():
+    """Recibe notificaciones de WhatsApp"""
     data = request.get_json()
+    print("=== 📩 Webhook recibido ===")
+    print(data)
+    
     try:
+        # Extraer el mensaje
         entry = data['entry'][0]['changes'][0]['value']
+        
         if 'messages' in entry:
             mensaje = entry['messages'][0]
             remitente = mensaje['from']
+            print(f"📱 Mensaje de: {remitente}")
 
-            # VALIDACIÓN: LÍMITE DE PALABRAS
+            # Mensaje de texto
             if 'text' in mensaje:
                 cuerpo = mensaje['text']['body']
+                print(f"💬 Texto: {cuerpo}")
+                
                 if len(cuerpo.split()) > MAX_WORDS:
                     enviar_mensaje_texto(remitente, f"⚠️ El mensaje es muy largo. Máximo {MAX_WORDS} palabras.")
                 else:
                     enviar_mensaje_texto(remitente, "¡Hola! Soy tu bot conversor. Envíame un archivo .docx para empezar.")
+                print("✅ Respuesta enviada")
 
-            # VALIDACIÓN: LÍMITE DE PESO Y TIPO DE ARCHIVO
+            # Mensaje con documento
             elif 'document' in mensaje:
                 doc = mensaje['document']
+                print(f"📄 Documento: {doc['filename']} ({doc['file_size']} bytes)")
+                
                 if doc['file_size'] > MAX_FILE_SIZE:
                     enviar_mensaje_texto(remitente, "❌ El archivo pesa más de 10 MB.")
                 else:
-                    # Obtener la URL de descarga del archivo desde la API de Meta
-                    file_data = requests.get(f"https://graph.facebook.com/v18.0/{doc['id']}", 
-                                           headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}).json()
+                    # Obtener la URL de descarga del archivo
+                    file_data = requests.get(
+                        f"https://graph.facebook.com/v18.0/{doc['id']}", 
+                        headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}
+                    ).json()
                     
                     enviar_mensaje_texto(remitente, "⏳ Recibido. Estoy convirtiendo tu archivo...")
                     
-                    threading.Thread(target=procesar_y_convertir, 
-                                   args=(file_data['url'], doc['filename'], remitente)).start()
-
-    except:
-        pass
+                    threading.Thread(
+                        target=procesar_y_convertir, 
+                        args=(file_data['url'], doc['filename'], remitente)
+                    ).start()
+                print("✅ Conversión iniciada")
+        
+        else:
+            # Puede ser un status de mensaje entregado, ignorar
+            print("📊 Actualización de estado (ignorado)")
+            
+    except KeyError as e:
+        print(f"❌ Error de clave: {e}. Revisa la estructura del JSON")
+    except Exception as e:
+        print(f"❌ Error general: {e}")
+        import traceback
+        traceback.print_exc()
+    
     return "OK", 200
 
 @app.route('/download/<filename>')
 def descargar_archivo(filename):
+    """Descarga archivos convertidos"""
     return send_from_directory(UPLOAD_FOLDER, filename)
+
+@app.route('/')
+def home():
+    """Página de inicio para verificar que el bot está vivo"""
+    return "🤖 Bot de WhatsApp funcionando. Webhook en /webhook"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
