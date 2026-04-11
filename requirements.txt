@@ -1,4 +1,4 @@
-Flask==3.0.2
+Flask==2.3.2
 requests==2.31.0
-cloudconvert==1.0.0
-gunicorn==21.2.0
+gunicorn==20.1.0
+cloudconvert==3.0.0

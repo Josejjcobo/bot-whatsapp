@@ -58,27 +58,54 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         
         print(f"📥 Archivo descargado: {nombre_original}")
         
-        # 2. Convertir usando CloudConvert (DOCX a PDF)
+        # 2. Configurar CloudConvert
         api = cloudconvert.Api(api_key=CC_API_KEY)
-        process = api.convert({
-            "inputformat": "docx",
-            "outputformat": "pdf",
-            "input": "upload",
-            "file": open(input_path, 'rb')
-        })
         
+        # 3. Subir el archivo
+        upload_task = api.tasks.create(
+            operation="import/upload",
+            file=open(input_path, 'rb'),
+            filename=nombre_original
+        )
+        
+        print("📤 Archivo subido a CloudConvert")
+        
+        # 4. Crear tarea de conversión
+        convert_task = api.tasks.create(
+            operation="convert",
+            input="import/upload",
+            input_format="docx",
+            output_format="pdf",
+            wait=True
+        )
+        
+        print("🔄 Convirtiendo archivo...")
+        
+        # 5. Exportar el PDF
+        export_task = api.tasks.create(
+            operation="export/url",
+            input="convert",
+            wait=True
+        )
+        
+        # 6. Obtener la URL del PDF
+        pdf_url = export_task["result"]["files"][0]["url"]
+        
+        # 7. Descargar el PDF
         pdf_filename = nombre_original.rsplit('.', 1)[0] + ".pdf"
         pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
-        process.wait()
-        process.download(pdf_path)
+        
+        pdf_response = requests.get(pdf_url)
+        with open(pdf_path, 'wb') as f:
+            f.write(pdf_response.content)
         
         print(f"✅ Conversión completada: {pdf_filename}")
         
-        # 3. Generar link de descarga
+        # 8. Generar link de descarga
         link = f"{BASE_URL}/download/{pdf_filename}"
         enviar_mensaje_texto(telefono, f"✅ ¡Conversión lista!\n📄 {pdf_filename}\n🔗 {link}\n⏰ El link expirará en 5 minutos")
 
-        # 4. Lanzar hilos de borrado
+        # 9. Lanzar hilos de borrado
         threading.Thread(target=programar_borrado, args=(input_path,)).start()
         threading.Thread(target=programar_borrado, args=(pdf_path,)).start()
 
@@ -117,35 +144,29 @@ def recibir_notificacion():
                 if len(cuerpo.split()) > MAX_WORDS:
                     enviar_mensaje_texto(remitente, f"⚠️ El mensaje es muy largo. Máximo {MAX_WORDS} palabras.")
                 else:
-                    # NUEVO MENSAJE DE BIENVENIDA
-                    enviar_mensaje_texto(remitente, "🤖 *¡Hola! Soy tu bot conversor PDFMagic*\n\n📄 Envíame cualquier archivo WORD (.docx) y lo convertiré automáticamente a PDF.\n\n⚡ Sin registros, sin clics, sin complicaciones.\n\n🔒 Tus archivos se eliminan después de 5 minutos.\n\n✨ ¡Solo envía tu documento y yo hago el resto!")
+                    enviar_mensaje_texto(remitente, "🤖 *¡Hola! Soy tu bot conversor PDFMagic*\n\n📄 Envíame cualquier archivo WORD (.docx) y lo convertiré automáticamente a PDF.\n\n⚡ Sin registros, sin clics, sin complicaciones.\n\n🔒 ✨ ¡Solo envía tu documento y yo hago el resto!")
                 print("✅ Respuesta enviada")
 
             # Mensaje con documento
             elif 'document' in mensaje:
                 doc = mensaje['document']
                 
-                # Mostrar todo el documento para depuración
                 print(f"📄 Documento recibido: {doc}")
                 
-                # Obtener el tamaño de forma segura (puede venir en diferentes campos)
                 file_size = 0
                 if 'file_size' in doc:
                     file_size = doc['file_size']
                 elif 'size' in doc:
                     file_size = doc['size']
                 
-                # Obtener el nombre del archivo
                 filename = doc.get('filename', 'documento.docx')
                 
                 print(f"📄 Archivo: {filename}, Tamaño: {file_size} bytes")
                 
-                # Verificar límite de tamaño (si tenemos el tamaño)
                 if file_size > 0 and file_size > MAX_FILE_SIZE:
                     enviar_mensaje_texto(remitente, f"❌ El archivo pesa más de 10 MB. Pesa {file_size // (1024*1024)} MB")
                 else:
                     try:
-                        # Obtener la URL de descarga del archivo desde la API de Meta
                         file_data = requests.get(
                             f"https://graph.facebook.com/v18.0/{doc['id']}", 
                             headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}
@@ -169,7 +190,6 @@ def recibir_notificacion():
                 print("📊 Otro tipo de mensaje (ignorado)")
         
         elif 'statuses' in entry:
-            # Actualizaciones de estado de mensajes (entregado, leído, etc.)
             print("📊 Actualización de estado (ignorado)")
         
         else:
