@@ -74,7 +74,8 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
                     "operation": "convert",
                     "input": ["import-file"],
                     "input_format": "docx",
-                    "output_format": "pdf"
+                    "output_format": "pdf",
+                    "engine": "3"
                 },
                 "export-file": {
                     "operation": "export/url",
@@ -84,11 +85,15 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         }
         
         print("📦 Creando job en CloudConvert...")
+        print(f"📤 Enviando a CloudConvert: {job_data}")
+        
         response = requests.post(
             "https://api.cloudconvert.com/v2/jobs",
             json=job_data,
             headers=headers
         )
+        
+        print(f"📥 Respuesta CloudConvert status: {response.status_code}")
         
         if response.status_code != 201:
             print(f"❌ Error al crear job: {response.text}")
@@ -96,25 +101,36 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         
         job = response.json()
         print(f"✅ Job creado: {job.get('id')}")
+        print(f"📋 Respuesta completa del job: {job}")
         
         # 4. Obtener la URL de subida de la tarea import-file
         upload_url = None
         for task in job.get('tasks', []):
+            print(f"📋 Tarea: {task.get('operation')} - Estado: {task.get('status')}")
+            print(f"   Resultado: {task.get('result')}")
+            
             if task.get('operation') == 'import/upload':
                 if 'result' in task and task['result']:
                     if 'form' in task['result'] and 'url' in task['result']['form']:
                         upload_url = task['result']['form']['url']
+                        print("✅ URL encontrada en result.form.url")
                     elif 'url' in task['result']:
                         upload_url = task['result']['url']
+                        print("✅ URL encontrada en result.url")
+                    elif 'form' in task['result'] and 'action' in task['result']['form']:
+                        upload_url = task['result']['form']['action']
+                        print("✅ URL encontrada en result.form.action")
                 break
         
         if not upload_url:
-            print(f"❌ Respuesta del job: {job}")
+            print("❌ No se pudo encontrar la URL de subida en ninguna ubicación")
+            print(f"📋 Job completo: {job}")
             raise Exception("No se pudo obtener la URL de subida")
         
-        print(f"📤 URL de subida obtenida")
+        print(f"📤 URL de subida obtenida: {upload_url}")
         
         # 5. Subir el archivo con PUT a la URL obtenida
+        print("📤 Subiendo archivo a CloudConvert...")
         with open(input_path, 'rb') as f:
             upload_response = requests.put(
                 upload_url,
@@ -122,11 +138,13 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
                 headers={"Content-Type": "application/octet-stream"}
             )
         
+        print(f"📥 Respuesta subida: {upload_response.status_code}")
+        
         if upload_response.status_code not in [200, 201, 204]:
             print(f"❌ Error al subir archivo: {upload_response.text}")
             raise Exception(f"Error al subir archivo: {upload_response.status_code}")
         
-        print("📤 Archivo subido a CloudConvert")
+        print("📤 Archivo subido exitosamente a CloudConvert")
         
         # 6. Esperar a que termine la conversión
         print("🔄 Convirtiendo archivo...")
@@ -139,8 +157,11 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
                 headers=headers
             )
             job_status = response.json()
+            print(f"🔄 Intento {i+1}: Estado del job - {job_status.get('status')}")
             
             for task in job_status.get('tasks', []):
+                print(f"   Tarea: {task.get('operation')} - Estado: {task.get('status')}")
+                
                 if task.get('operation') == 'export/url' and task.get('status') == 'finished':
                     files = task.get('result', {}).get('files', [])
                     if files and 'url' in files[0]:
@@ -149,6 +170,7 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
                         pdf_filename = nombre_original.rsplit('.', 1)[0] + ".pdf"
                         pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
                         
+                        print(f"📥 Descargando PDF desde: {pdf_url}")
                         pdf_response = requests.get(pdf_url)
                         with open(pdf_path, 'wb') as f:
                             f.write(pdf_response.content)
@@ -168,6 +190,8 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
 
     except Exception as e:
         print(f"❌ Error en conversión: {e}")
+        import traceback
+        traceback.print_exc()
         enviar_mensaje_texto(telefono, f"❌ Error: {str(e)}")
 
 @app.route('/webhook', methods=['GET'])
