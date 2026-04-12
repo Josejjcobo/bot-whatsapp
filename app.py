@@ -2,8 +2,8 @@ import os
 import time
 import threading
 import requests
+import cloudconvert
 from flask import Flask, request, send_from_directory
-from cloudconvert import CloudConvert
 
 app = Flask(__name__)
 
@@ -58,73 +58,63 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         
         print(f"📥 Archivo descargado: {nombre_original}")
         
-        # 2. Configurar CloudConvert API v2
-        api = CloudConvert(api_key=CC_API_KEY, sandbox=False)
+        # 2. Configurar CloudConvert (versión 2.1.0)
+        api = cloudconvert.Api(api_key=CC_API_KEY)
         
-        # 3. Crear una tarea de conversión
-        job = api.jobs.create(
-            tasks={
-                'import-file': {
-                    'operation': 'import/upload'
-                },
-                'convert-file': {
-                    'operation': 'convert',
-                    'input': 'import-file',
-                    'input_format': 'docx',
-                    'output_format': 'pdf'
-                },
-                'export-file': {
-                    'operation': 'export/url',
-                    'input': 'convert-file'
-                }
-            },
-            tag='whatsapp_conversion'
-        )
+        # 3. Subir el archivo y convertir
+        task = api.tasks.create({
+            'operation': 'import/upload',
+            'file': open(input_path, 'rb'),
+            'filename': nombre_original,
+            'input_format': 'docx',
+            'output_format': 'pdf',
+            'wait': True
+        })
         
-        # 4. Subir el archivo
-        upload_task_id = job['tasks'][0]['id']
-        upload_url = api.tasks.get_upload_url(upload_task_id)
+        print(f"🔄 Convirtiendo archivo...")
         
-        with open(input_path, 'rb') as f:
-            requests.put(upload_url, data=f.read())
-        
-        print("📤 Archivo subido a CloudConvert")
-        
-        # 5. Esperar a que termine la conversión
-        print("🔄 Convirtiendo archivo...")
-        
+        # 4. Obtener el resultado
+        task_id = task['id']
         while True:
-            job = api.jobs.get(job['id'])
-            export_task = None
-            for task in job['tasks']:
-                if task['name'] == 'export-file':
-                    export_task = task
-                    break
-            
-            if export_task and export_task['status'] == 'finished':
+            task_status = api.tasks.get(task_id)
+            if task_status['status'] == 'finished':
                 break
-            elif export_task and export_task['status'] == 'error':
+            elif task_status['status'] == 'error':
                 raise Exception("Error en la conversión")
             time.sleep(2)
         
-        # 6. Obtener la URL del archivo convertido
-        file_url_result = export_task['result']['files'][0]['url']
-        
-        # 7. Descargar el PDF
+        # 5. Descargar el PDF
         pdf_filename = nombre_original.rsplit('.', 1)[0] + ".pdf"
         pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
         
-        pdf_response = requests.get(file_url_result)
+        # Obtener la URL de descarga
+        export_task = api.tasks.create({
+            'operation': 'export/url',
+            'input': task_id
+        })
+        
+        export_task_id = export_task['id']
+        while True:
+            export_status = api.tasks.get(export_task_id)
+            if export_status['status'] == 'finished':
+                break
+            elif export_status['status'] == 'error':
+                raise Exception("Error en la exportación")
+            time.sleep(2)
+        
+        pdf_url = export_status['result']['files'][0]['url']
+        
+        pdf_response = requests.get(pdf_url)
         with open(pdf_path, 'wb') as f:
             f.write(pdf_response.content)
         
         print(f"✅ Conversión completada: {pdf_filename}")
         
-        # 8. Generar link de descarga
+        # 6. Generar link de descarga
         link = f"{BASE_URL}/download/{pdf_filename}"
         enviar_mensaje_texto(telefono, f"✅ ¡Conversión lista!\n📄 {pdf_filename}\n🔗 {link}\n⏰ El link expirará en 5 minutos")
 
-        # 9. Lanzar hilos de borrado
+        # 7. Lanzar hilos de borrado
         threading.Thread(target=programar_borrado, args=(input_path,)).start()
         threading.Thread(target=programar_borrado, args=(pdf_path,)).start()
 
