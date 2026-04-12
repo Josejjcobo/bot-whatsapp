@@ -2,8 +2,8 @@ import os
 import time
 import threading
 import requests
-import cloudconvert
 from flask import Flask, request, send_from_directory
+from cloudconvert import CloudConvert
 
 app = Flask(__name__)
 
@@ -12,7 +12,7 @@ ACCESS_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 PHONE_ID = os.environ.get("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 CC_API_KEY = os.environ.get("CLOUD_CONVERT_API_KEY")
-BASE_URL = os.environ.get("BASE_URL", "https://bot-whatsapp-mljx.onrender.com")
+BASE_URL = os.environ.get("BASE_URL", "https://bot-whatsapp-zcek.onrender.com")
 
 # --- LÍMITES Y RUTAS ---
 MAX_WORDS = 200
@@ -58,44 +58,63 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         
         print(f"📥 Archivo descargado: {nombre_original}")
         
-        # 2. Configurar CloudConvert
-        api = cloudconvert.Api(api_key=CC_API_KEY)
+        # 2. Configurar CloudConvert API v2
+        api = CloudConvert(api_key=CC_API_KEY, sandbox=False)
         
-        # 3. Subir el archivo
-        upload_task = api.tasks.create(
-            operation="import/upload",
-            file=open(input_path, 'rb'),
-            filename=nombre_original
+        # 3. Crear una tarea de conversión
+        job = api.jobs.create(
+            tasks={
+                'import-file': {
+                    'operation': 'import/upload'
+                },
+                'convert-file': {
+                    'operation': 'convert',
+                    'input': 'import-file',
+                    'input_format': 'docx',
+                    'output_format': 'pdf'
+                },
+                'export-file': {
+                    'operation': 'export/url',
+                    'input': 'convert-file'
+                }
+            },
+            tag='whatsapp_conversion'
         )
+        
+        # 4. Subir el archivo
+        upload_task_id = job['tasks'][0]['id']
+        upload_url = api.tasks.get_upload_url(upload_task_id)
+        
+        with open(input_path, 'rb') as f:
+            requests.put(upload_url, data=f.read())
         
         print("📤 Archivo subido a CloudConvert")
         
-        # 4. Crear tarea de conversión
-        convert_task = api.tasks.create(
-            operation="convert",
-            input="import/upload",
-            input_format="docx",
-            output_format="pdf",
-            wait=True
-        )
-        
+        # 5. Esperar a que termine la conversión
         print("🔄 Convirtiendo archivo...")
         
-        # 5. Exportar el PDF
-        export_task = api.tasks.create(
-            operation="export/url",
-            input="convert",
-            wait=True
-        )
+        while True:
+            job = api.jobs.get(job['id'])
+            export_task = None
+            for task in job['tasks']:
+                if task['name'] == 'export-file':
+                    export_task = task
+                    break
+            
+            if export_task and export_task['status'] == 'finished':
+                break
+            elif export_task and export_task['status'] == 'error':
+                raise Exception("Error en la conversión")
+            time.sleep(2)
         
-        # 6. Obtener la URL del PDF
-        pdf_url = export_task["result"]["files"][0]["url"]
+        # 6. Obtener la URL del archivo convertido
+        file_url_result = export_task['result']['files'][0]['url']
         
         # 7. Descargar el PDF
         pdf_filename = nombre_original.rsplit('.', 1)[0] + ".pdf"
         pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
         
-        pdf_response = requests.get(pdf_url)
+        pdf_response = requests.get(file_url_result)
         with open(pdf_path, 'wb') as f:
             f.write(pdf_response.content)
         
