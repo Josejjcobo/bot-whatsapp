@@ -64,7 +64,7 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
             "Content-Type": "application/json"
         }
         
-        # 3. Crear el job con las tareas (usando nombres más simples)
+        # 3. Crear el job con las tareas
         job_data = {
             "tasks": {
                 "upload": {
@@ -93,61 +93,60 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         print(f"📥 Respuesta CloudConvert status: {response.status_code}")
         
         if response.status_code != 201:
-            print(f"❌ Error al crear job: {response.text}")
-            raise Exception(f"Error al crear job: {response.status_code}")
+            raise Exception(f"Error al crear job: {response.text}")
         
         job = response.json()
         
-        # === EXTRAER JOB ID ===
-        job_id = None
-        if 'data' in job and isinstance(job['data'], dict) and 'id' in job['data']:
-            job_id = job['data']['id']
-            print(f"✅ Job ID extraído de 'data.id': {job_id}")
-        elif 'id' in job:
-            job_id = job['id']
-            print(f"✅ Job ID extraído de 'id': {job_id}")
-        else:
+        # Extraer job ID
+        job_id = job.get('data', {}).get('id')
+        if not job_id:
             raise Exception(f"No se pudo extraer job_id. Respuesta: {job}")
         
-        # === OBTENER URL DE SUBIDA ===
-        upload_url = None
-        tasks_list = job.get('data', {}).get('tasks', job.get('tasks', []))
+        print(f"✅ Job ID: {job_id}")
+        
+        # Obtener URL de subida y parámetros del formulario
+        upload_data = None
+        tasks_list = job.get('data', {}).get('tasks', [])
         
         for task in tasks_list:
             if task.get('operation') == 'import/upload':
-                result = task.get('result', {})
-                upload_url = result.get('url') or result.get('form', {}).get('url')
-                if upload_url:
-                    print(f"✅ URL de subida obtenida")
+                upload_data = task.get('result', {})
+                if upload_data:
+                    print("✅ Datos de subida obtenidos")
                     break
         
+        if not upload_data:
+            raise Exception("No se pudo obtener la información de subida")
+        
+        # La URL puede estar en 'url' o en 'form.url'
+        upload_url = upload_data.get('url') or upload_data.get('form', {}).get('url')
         if not upload_url:
             raise Exception("No se pudo encontrar la URL de subida")
         
-        # === SUBIR EL ARCHIVO INMEDIATAMENTE ===
-        print("📤 Subiendo archivo a CloudConvert...")
+        print(f"📤 Subiendo archivo a CloudConvert...")
         
-        with open(input_path, 'rb') as f:
-            file_data = f.read()
+        # Construir el multipart/form-data correctamente
+        # Los parámetros del formulario están en upload_data.get('form', {})
+        form_params = upload_data.get('form', {})
         
-        # Intentar con PUT primero
-        upload_response = requests.put(
+        # Crear el archivo para subir
+        files = {
+            'file': (nombre_original, open(input_path, 'rb'), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+        }
+        
+        # Agregar todos los parámetros del formulario
+        data_params = {}
+        for key, value in form_params.items():
+            data_params[key] = value
+        
+        # Subir con POST usando multipart/form-data
+        upload_response = requests.post(
             upload_url,
-            data=file_data,
-            headers={"Content-Type": "application/octet-stream"}
+            data=data_params,
+            files=files
         )
         
-        print(f"📥 Respuesta subida (PUT): {upload_response.status_code}")
-        
-        # Si PUT falla con 403, intentar con POST
-        if upload_response.status_code == 403:
-            print("⚠️ PUT falló con 403, intentando con POST...")
-            upload_response = requests.post(
-                upload_url,
-                data=file_data,
-                headers={"Content-Type": "application/octet-stream"}
-            )
-            print(f"📥 Respuesta subida (POST): {upload_response.status_code}")
+        print(f"📥 Respuesta subida: {upload_response.status_code}")
         
         if upload_response.status_code not in [200, 201, 204]:
             raise Exception(f"Error al subir archivo: {upload_response.status_code} - {upload_response.text[:200]}")
@@ -156,7 +155,7 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         
         # 4. Esperar a que termine la conversión
         print("🔄 Convirtiendo archivo... (esto puede tomar un minuto)")
-        max_attempts = 90  # 90 intentos * 2 segundos = 3 minutos máximo
+        max_attempts = 90
         
         for i in range(max_attempts):
             time.sleep(2)
@@ -171,7 +170,7 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
                 continue
             
             job_status = status_response.json()
-            tasks_list = job_status.get('data', {}).get('tasks', job_status.get('tasks', []))
+            tasks_list = job_status.get('data', {}).get('tasks', [])
             
             for task in tasks_list:
                 if task.get('operation') == 'export/url' and task.get('status') == 'finished':
@@ -209,14 +208,12 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
 
 @app.route('/webhook', methods=['GET'])
 def verificar_token():
-    """Verificación del webhook por Meta"""
     if request.args.get("hub.verify_token") == VERIFY_TOKEN:
         return request.args.get("hub.challenge"), 200
     return "Error de validación", 403
 
 @app.route('/webhook', methods=['POST'])
 def recibir_notificacion():
-    """Recibe notificaciones de WhatsApp"""
     data = request.get_json()
     print("=== 📩 Webhook recibido ===")
     
@@ -232,21 +229,16 @@ def recibir_notificacion():
                 cuerpo = mensaje['text']['body']
                 print(f"💬 Texto: {cuerpo}")
                 enviar_mensaje_texto(remitente, "🤖 *¡Hola! Soy tu bot conversor PDFMagic*\n\n📄 Envíame cualquier archivo WORD (.docx) y lo convertiré automáticamente a PDF.\n\n⚡ Sin registros, sin clics, sin complicaciones.")
-                print("✅ Respuesta enviada")
 
             elif 'document' in mensaje:
                 doc = mensaje['document']
                 filename = doc.get('filename', 'documento.docx')
                 print(f"📄 Documento: {filename}")
-                print(f"📄 ID del documento: {doc['id']}")
                 
-                # Obtener la URL del archivo desde Meta
                 file_data = requests.get(
                     f"https://graph.facebook.com/v18.0/{doc['id']}", 
                     headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}
                 ).json()
-                
-                print(f"📥 Datos del archivo desde Meta: {file_data}")
                 
                 if 'url' in file_data:
                     enviar_mensaje_texto(remitente, "⏳ ¡Recibido! Estoy convirtiendo tu archivo a PDF... 🔄")
@@ -255,34 +247,19 @@ def recibir_notificacion():
                         args=(file_data['url'], filename, remitente)
                     ).start()
                 else:
-                    print(f"❌ Error: No se encontró URL en {file_data}")
                     enviar_mensaje_texto(remitente, "❌ No se pudo obtener el archivo. Intenta de nuevo.")
-            else:
-                print("📊 Otro tipo de mensaje (ignorado)")
         
-        elif 'statuses' in entry:
-            print("📊 Actualización de estado (ignorado)")
-        
-        else:
-            print("📊 Otro tipo de evento (ignorado)")
-            
-    except KeyError as e:
-        print(f"❌ Error de clave: {e}")
     except Exception as e:
-        print(f"❌ Error general: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error: {e}")
     
     return "OK", 200
 
 @app.route('/download/<filename>')
 def descargar_archivo(filename):
-    """Descarga archivos convertidos"""
     return send_from_directory(UPLOAD_FOLDER, filename)
 
 @app.route('/')
 def home():
-    """Página de inicio para verificar que el bot está vivo"""
     return "🤖 Bot de WhatsApp funcionando. Webhook en /webhook"
 
 if __name__ == "__main__":
