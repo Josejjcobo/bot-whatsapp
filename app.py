@@ -96,6 +96,7 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
             raise Exception(f"Error al crear job: {response.text}")
         
         job = response.json()
+        print(f"📋 Job response: {job}")
         
         # Extraer job ID
         job_id = job.get('data', {}).get('id')
@@ -104,49 +105,56 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         
         print(f"✅ Job ID: {job_id}")
         
-        # Obtener URL de subida y parámetros del formulario
-        upload_data = None
+        # Obtener la tarea de import/upload
         tasks_list = job.get('data', {}).get('tasks', [])
-        
+        upload_task = None
         for task in tasks_list:
             if task.get('operation') == 'import/upload':
-                upload_data = task.get('result', {})
-                if upload_data:
-                    print("✅ Datos de subida obtenidos")
-                    break
+                upload_task = task
+                break
         
-        if not upload_data:
-            raise Exception("No se pudo obtener la información de subida")
+        if not upload_task:
+            raise Exception("No se encontró la tarea de import/upload")
         
-        # La URL puede estar en 'url' o en 'form.url'
-        upload_url = upload_data.get('url') or upload_data.get('form', {}).get('url')
+        # Obtener la URL y los parámetros del formulario
+        result = upload_task.get('result', {})
+        upload_url = result.get('url')
+        form_params = result.get('form', {})
+        
         if not upload_url:
             raise Exception("No se pudo encontrar la URL de subida")
         
-        print(f"📤 Subiendo archivo a CloudConvert...")
+        print(f"📤 URL de subida: {upload_url}")
+        print(f"📋 Parámetros del formulario: {form_params}")
         
-        # Construir el multipart/form-data correctamente
-        # Los parámetros del formulario están en upload_data.get('form', {})
-        form_params = upload_data.get('form', {})
-        
-        # Crear el archivo para subir
-        files = {
-            'file': (nombre_original, open(input_path, 'rb'), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-        }
-        
-        # Agregar todos los parámetros del formulario
+        # Construir la petición multipart/form-data
+        # El parámetro 'key' debe incluir el nombre del archivo
+        # La clave 'key' tiene un formato como: task_id/${filename}
+        # Reemplazamos ${filename} con el nombre real del archivo
+        files = {}
         data_params = {}
-        for key, value in form_params.items():
-            data_params[key] = value
         
-        # Subir con POST usando multipart/form-data
-        upload_response = requests.post(
-            upload_url,
-            data=data_params,
-            files=files
-        )
+        for key, value in form_params.items():
+            if key == 'key':
+                # Reemplazar ${filename} con el nombre del archivo
+                value = value.replace('${filename}', nombre_original)
+                data_params[key] = value
+            else:
+                data_params[key] = value
+        
+        # Agregar el archivo
+        with open(input_path, 'rb') as f:
+            files['file'] = (nombre_original, f.read(), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+            
+            # Hacer la petición POST
+            upload_response = requests.post(
+                upload_url,
+                data=data_params,
+                files=files
+            )
         
         print(f"📥 Respuesta subida: {upload_response.status_code}")
+        print(f"📥 Respuesta texto: {upload_response.text[:500]}")
         
         if upload_response.status_code not in [200, 201, 204]:
             raise Exception(f"Error al subir archivo: {upload_response.status_code} - {upload_response.text[:200]}")
@@ -174,9 +182,9 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
             
             for task in tasks_list:
                 if task.get('operation') == 'export/url' and task.get('status') == 'finished':
-                    files = task.get('result', {}).get('files', [])
-                    if files and 'url' in files[0]:
-                        pdf_url = files[0]['url']
+                    files_result = task.get('result', {}).get('files', [])
+                    if files_result and 'url' in files_result[0]:
+                        pdf_url = files_result[0]['url']
                         
                         pdf_filename = nombre_original.rsplit('.', 1)[0] + ".pdf"
                         pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
