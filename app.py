@@ -64,21 +64,21 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
             "Content-Type": "application/json"
         }
         
-        # 3. Crear el job con las tareas
+        # 3. Crear el job con las tareas (usando nombres más simples)
         job_data = {
             "tasks": {
-                "import-file": {
+                "upload": {
                     "operation": "import/upload"
                 },
-                "convert-file": {
+                "convert": {
                     "operation": "convert",
-                    "input": ["import-file"],
+                    "input": ["upload"],
                     "input_format": "docx",
                     "output_format": "pdf"
                 },
-                "export-file": {
+                "export": {
                     "operation": "export/url",
-                    "input": ["convert-file"]
+                    "input": ["convert"]
                 }
             }
         }
@@ -98,28 +98,16 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         
         job = response.json()
         
-        # === EXTRACCIÓN ROBUSTA DEL JOB ID ===
+        # === EXTRAER JOB ID ===
         job_id = None
-        
-        # Intento 1: Directamente en 'data.id'
         if 'data' in job and isinstance(job['data'], dict) and 'id' in job['data']:
             job_id = job['data']['id']
-            print("✅ Job ID extraído de 'data.id'")
-        # Intento 2: Directamente en 'id'
+            print(f"✅ Job ID extraído de 'data.id': {job_id}")
         elif 'id' in job:
             job_id = job['id']
-            print("✅ Job ID extraído de 'id'")
-        # Intento 3: Buscar en cualquier tarea
+            print(f"✅ Job ID extraído de 'id': {job_id}")
         else:
-            tasks = job.get('data', {}).get('tasks', job.get('tasks', []))
-            if tasks and 'job_id' in tasks[0]:
-                job_id = tasks[0]['job_id']
-                print("✅ Job ID extraído de la primera tarea")
-        
-        print(f"📋 Job ID extraído: {job_id}")
-        
-        if not job_id:
-            raise Exception(f"No se pudo extraer job_id. Respuesta completa: {job}")
+            raise Exception(f"No se pudo extraer job_id. Respuesta: {job}")
         
         # === OBTENER URL DE SUBIDA ===
         upload_url = None
@@ -130,34 +118,49 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
                 result = task.get('result', {})
                 upload_url = result.get('url') or result.get('form', {}).get('url')
                 if upload_url:
-                    print("✅ URL de subida encontrada")
+                    print(f"✅ URL de subida obtenida")
                     break
         
         if not upload_url:
-            raise Exception("No se pudo encontrar la URL de subida en la respuesta")
+            raise Exception("No se pudo encontrar la URL de subida")
         
-        # 4. Subir el archivo con PUT
-        print("📤 Subiendo archivo...")
+        # === SUBIR EL ARCHIVO INMEDIATAMENTE ===
+        print("📤 Subiendo archivo a CloudConvert...")
+        
         with open(input_path, 'rb') as f:
-            upload_response = requests.put(
+            file_data = f.read()
+        
+        # Intentar con PUT primero
+        upload_response = requests.put(
+            upload_url,
+            data=file_data,
+            headers={"Content-Type": "application/octet-stream"}
+        )
+        
+        print(f"📥 Respuesta subida (PUT): {upload_response.status_code}")
+        
+        # Si PUT falla con 403, intentar con POST
+        if upload_response.status_code == 403:
+            print("⚠️ PUT falló con 403, intentando con POST...")
+            upload_response = requests.post(
                 upload_url,
-                data=f.read(),
+                data=file_data,
                 headers={"Content-Type": "application/octet-stream"}
             )
+            print(f"📥 Respuesta subida (POST): {upload_response.status_code}")
         
         if upload_response.status_code not in [200, 201, 204]:
-            raise Exception(f"Error al subir archivo: {upload_response.status_code}")
+            raise Exception(f"Error al subir archivo: {upload_response.status_code} - {upload_response.text[:200]}")
         
         print("✅ Archivo subido exitosamente")
         
-        # 5. Esperar a que termine la conversión
+        # 4. Esperar a que termine la conversión
         print("🔄 Convirtiendo archivo... (esto puede tomar un minuto)")
-        max_attempts = 60
+        max_attempts = 90  # 90 intentos * 2 segundos = 3 minutos máximo
         
         for i in range(max_attempts):
             time.sleep(2)
             
-            # Consultar el estado del job
             status_response = requests.get(
                 f"https://api.cloudconvert.com/v2/jobs/{job_id}",
                 headers=headers
@@ -235,12 +238,15 @@ def recibir_notificacion():
                 doc = mensaje['document']
                 filename = doc.get('filename', 'documento.docx')
                 print(f"📄 Documento: {filename}")
+                print(f"📄 ID del documento: {doc['id']}")
                 
                 # Obtener la URL del archivo desde Meta
                 file_data = requests.get(
                     f"https://graph.facebook.com/v18.0/{doc['id']}", 
                     headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}
                 ).json()
+                
+                print(f"📥 Datos del archivo desde Meta: {file_data}")
                 
                 if 'url' in file_data:
                     enviar_mensaje_texto(remitente, "⏳ ¡Recibido! Estoy convirtiendo tu archivo a PDF... 🔄")
