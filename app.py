@@ -9,10 +9,10 @@ app = Flask(__name__)
 
 # --- CONFIGURACIÓN DE VARIABLES ---
 ACCESS_TOKEN = os.environ.get("WHATSAPP_TOKEN")
-PHONE_ID     = os.environ.get("PHONE_NUMBER_ID")
+PHONE_ID = os.environ.get("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
-CC_API_KEY   = os.environ.get("CLOUD_CONVERT_API_KEY")
-BASE_URL     = os.environ.get("BASE_URL", "https://bot-whatsapp-zcek.onrender.com")
+CC_API_KEY = os.environ.get("CLOUD_CONVERT_API_KEY")
+BASE_URL = os.environ.get("BASE_URL", "https://bot-whatsapp-zcek.onrender.com")
 
 # --- RUTAS ---
 UPLOAD_FOLDER = '/tmp/archivos_bot'
@@ -20,12 +20,9 @@ if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
 # --- ESTADO POR USUARIO ---
-# Guarda el archivo pendiente de conversión por número de teléfono
-# { "521566...": { "file_url": "...", "filename": "...", "opciones": [...] } }
 sesiones = {}
 
 # --- CONVERSIONES SOPORTADAS ---
-# Cada entrada: (extensión_entrada, formato_cc_entrada, formato_cc_salida, extensión_salida, mime_type)
 CONVERSIONES = {
     "docx": [
         ("docx", "pdf",  ".pdf",  "PDF",  "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
@@ -57,7 +54,6 @@ MENSAJE_BIENVENIDA = (
     "Envíame un archivo y te diré qué puedo hacer con él."
 )
 
-
 # ─────────────────────────────────────────
 # UTILIDADES
 # ─────────────────────────────────────────
@@ -69,14 +65,12 @@ def sanitizar_nombre(nombre):
     n = n.replace(' ', '_')
     return n
 
-
 def programar_borrado(ruta):
     """Espera 10 minutos y elimina el archivo."""
     time.sleep(600)
     if os.path.exists(ruta):
         os.remove(ruta)
         print(f"🧹 Limpieza: {ruta} eliminado.")
-
 
 def enviar_mensaje_texto(receptor, texto):
     """Envía un mensaje de texto por WhatsApp."""
@@ -95,7 +89,6 @@ def enviar_mensaje_texto(receptor, texto):
             print(f"  Error: {r.text}")
     except Exception as e:
         print(f"❌ Error enviando mensaje: {e}")
-
 
 # ─────────────────────────────────────────
 # LÓGICA DE CONVERSIÓN
@@ -143,7 +136,7 @@ def procesar_y_convertir(file_url, nombre_original, input_format, output_format,
             raise Exception(f"No se obtuvo job_id: {job}")
         print(f"✅ Job ID: {job_id}")
 
-        # 3. Obtener URL de subida (result.form.url / result.form.parameters)
+        # 3. Obtener URL de subida
         tasks_list  = job.get('data', {}).get('tasks', [])
         upload_task = next((t for t in tasks_list if t.get('operation') == 'import/upload'), None)
         if not upload_task:
@@ -157,7 +150,7 @@ def procesar_y_convertir(file_url, nombre_original, input_format, output_format,
         if not upload_url:
             raise Exception(f"No se encontró URL de subida. result={result}")
 
-        # 4. Subir archivo a CloudConvert (multipart/form-data)
+        # 4. Subir archivo a CloudConvert
         data_params = {}
         for k, v in form_params.items():
             data_params[k] = v.replace('${filename}', nombre_seguro) if k == 'key' else v
@@ -214,12 +207,6 @@ def procesar_y_convertir(file_url, nombre_original, input_format, output_format,
                             threading.Thread(target=programar_borrado, args=(out_path,)).start()
                             return
 
-            # Detectar error del job
-            if job_status.get('data', {}).get('status') == 'error':
-                err_task = next((t for t in current_tasks if t.get('status') == 'error'), None)
-                err_msg  = err_task.get('message', 'Error desconocido') if err_task else 'Error desconocido'
-                raise Exception(f"CloudConvert error: {err_msg}")
-
             if i % 10 == 0:
                 print(f"⏳ Esperando... ({i * 2}s)")
 
@@ -269,7 +256,7 @@ def recibir_notificacion():
                 if cuerpo.isdigit() and 1 <= int(cuerpo) <= len(opciones):
                     idx    = int(cuerpo) - 1
                     opcion = opciones[idx]
-                    del sesiones[remitente]  # limpiar sesión
+                    del sesiones[remitente]
 
                     enviar_mensaje_texto(
                         remitente,
