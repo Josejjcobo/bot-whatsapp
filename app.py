@@ -294,7 +294,20 @@ def recibir_notificacion():
 
 @app.route('/download/<filename>')
 def descargar_archivo(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
+    ruta_completa = os.path.join(UPLOAD_FOLDER, filename)
+    print(f"📂 Solicitud de descarga: {filename}")
+    print(f"📂 Ruta completa: {ruta_completa}")
+    print(f"📂 ¿Existe el archivo? {os.path.exists(ruta_completa)}")
+    print(f"📂 Archivos en carpeta: {os.listdir(UPLOAD_FOLDER)}")
+
+    if not os.path.exists(ruta_completa):
+        return f"❌ Archivo no encontrado: {filename}", 404
+
+    return send_from_directory(
+        os.path.abspath(UPLOAD_FOLDER),
+        filename,
+        as_attachment=True
+    )
 
 
 @app.route('/')
