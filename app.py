@@ -54,12 +54,19 @@ def enviar_mensaje_texto(receptor, texto):
 def procesar_y_convertir(file_url, nombre_original, telefono):
     """Descarga de Meta, convierte en CloudConvert y programa limpieza"""
     try:
-        # 1. Descargar el archivo desde los servidores de Meta
+        # 1. Sanitizar nombre: eliminar acentos y reemplazar espacios por guiones bajos
+        import unicodedata
+        nombre_seguro = unicodedata.normalize('NFKD', nombre_original)
+        nombre_seguro = nombre_seguro.encode('ascii', 'ignore').decode('ascii')
+        nombre_seguro = nombre_seguro.replace(' ', '_')
+        print(f"📝 Nombre original: {nombre_original} → seguro: {nombre_seguro}")
+
+        # Descargar el archivo desde los servidores de Meta
         r = requests.get(file_url, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
-        input_path = os.path.join(UPLOAD_FOLDER, nombre_original)
+        input_path = os.path.join(UPLOAD_FOLDER, nombre_seguro)
         with open(input_path, 'wb') as f:
             f.write(r.content)
-        print(f"📥 Archivo descargado: {nombre_original}")
+        print(f"📥 Archivo descargado: {nombre_seguro}")
 
         # 2. Configurar headers para CloudConvert
         headers = {
@@ -134,10 +141,9 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
         data_params = {}
         for key, value in form_params.items():
             if key == 'key':
-                value = value.replace('${filename}', nombre_original)
+                value = value.replace('${filename}', nombre_seguro)
             data_params[key] = value
 
-        # ✅ Leer el archivo primero para evitar que se cierre antes del POST
         with open(input_path, 'rb') as f:
             file_content = f.read()
 
@@ -146,7 +152,7 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
             data=data_params,
             files={
                 'file': (
-                    nombre_original,
+                    nombre_seguro,
                     file_content,
                     'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
                 )
@@ -185,7 +191,7 @@ def procesar_y_convertir(file_url, nombre_original, telefono):
                     files_result = task.get('result', {}).get('files', [])
                     if files_result and 'url' in files_result[0]:
                         pdf_url = files_result[0]['url']
-                        pdf_filename = nombre_original.rsplit('.', 1)[0] + ".pdf"
+                        pdf_filename = nombre_seguro.rsplit('.', 1)[0] + ".pdf"
                         pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
 
                         pdf_response = requests.get(pdf_url)
