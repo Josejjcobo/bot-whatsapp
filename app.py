@@ -5,13 +5,12 @@ import unicodedata
 import requests
 from flask import Flask, request, send_from_directory
 
-# Intentar importar Gemini (opcional)
 try:
     import google.generativeai as genai
     GEMINI_DISPONIBLE = True
 except ImportError:
     GEMINI_DISPONIBLE = False
-    print("⚠️ Gemini no disponible. Instala: pip install google-generativeai")
+    print("⚠️ Gemini no disponible")
 
 app = Flask(__name__)
 
@@ -45,22 +44,20 @@ sesiones = {}
 CONVERSIONES = {
     "docx": [("docx", "pdf", ".pdf", "PDF", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")],
     "xlsx": [("xlsx", "pdf", ".pdf", "PDF", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")],
-    "pdf": [("pdf", "docx", ".docx", "Word (DOCX)", "application/pdf")],
     "jpg": [("jpg", "pdf", ".pdf", "PDF", "image/jpeg")],
     "jpeg": [("jpeg", "pdf", ".pdf", "PDF", "image/jpeg")],
     "png": [("png", "pdf", ".pdf", "PDF", "image/png")],
+    "pdf": [("pdf", "docx", ".docx", "Word (DOCX)", "application/pdf")],
 }
 
 MENSAJE_BIENVENIDA = (
     "🤖 *¡Hola! Soy PDFMagic Bot*\n\n"
-    "Puedo hacer lo siguiente:\n\n"
-    "📄 *DOCX* → PDF\n"
-    "📊 *XLSX* → PDF\n"
-    "🖼️ *JPG/PNG* → PDF\n"
-    "📑 *PDF* → Word\n"
-    "🤖 *PDF* → Resumir con IA\n"
-    "🌐 *PDF* → Traducir (Inglés/Francés)\n\n"
-    "Envía un archivo y te ayudo."
+    "Envía un archivo y te preguntaré qué quieres hacer con él.\n\n"
+    "📄 *DOCX* → Convertir a PDF\n"
+    "📊 *XLSX* → Convertir a PDF\n"
+    "🖼️ *JPG/PNG* → Convertir a PDF\n"
+    "📑 *PDF* → Convertir a Word / Resumir / Traducir\n\n"
+    "¡Envía tu archivo!"
 )
 
 def sanitizar_nombre(nombre):
@@ -116,10 +113,8 @@ def traducir_con_gemini(texto, idioma):
         return "❌ IA no disponible"
     if len(texto) > 8000:
         texto = texto[:8000]
-    
     idiomas = {'1': 'inglés', '2': 'francés'}
     lang = idiomas.get(idioma, 'inglés')
-    
     prompt = f"Traduce el siguiente texto al {lang} de forma natural y precisa:\n\n{texto}\n\nTraducción:"
     try:
         respuesta = gemini_model.generate_content(prompt)
@@ -189,7 +184,7 @@ def procesar_y_convertir(file_url, nombre_original, input_format, output_format,
                             with open(out_path, 'wb') as f:
                                 f.write(out_resp.content)
                             link = f"{BASE_URL}/download/{out_filename}"
-                            enviar_mensaje_texto(telefono, f"✅ *¡Listo!*\n📄 {out_filename}\n🔗 {link}")
+                            enviar_mensaje_texto(telefono, f"✅ *¡Listo!*\n📄 {out_filename}\n🔗 {link}\n⏰ Link expira en 10 min")
                             threading.Thread(target=programar_borrado, args=(input_path,)).start()
                             threading.Thread(target=programar_borrado, args=(out_path,)).start()
                             return
@@ -218,53 +213,68 @@ def recibir_notificacion():
         remitente = mensaje['from']
         print(f"📱 De: {remitente}")
 
-        # --- TEXTO ---
+        # --- MENSAJE DE TEXTO ---
         if 'text' in mensaje:
             cuerpo = mensaje['text']['body'].strip()
             print(f"💬 Texto: {cuerpo}")
 
+            # Verificar si el usuario está en una sesión activa
             if remitente in sesiones:
                 sesion = sesiones[remitente]
                 estado = sesion.get('estado', '')
 
-                # Esperando opción de IA para PDF
-                if estado == 'esperando_opcion_pdf':
-                    if cuerpo in ['1', '2', '3']:
-                        sesion['accion'] = cuerpo
-                        if cuerpo == '2':
-                            enviar_mensaje_texto(remitente, "📝 *Resumen del documento*\n\n⏳ Procesando...")
-                            r = requests.get(sesion['file_url'], headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
-                            temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{remitente}.pdf")
-                            with open(temp_path, 'wb') as f:
-                                f.write(r.content)
-                            texto = extraer_texto_pdf(temp_path)
-                            if texto:
-                                resumen = resumir_con_gemini(texto)
-                                if len(resumen) > 1600:
-                                    for parte in [resumen[i:i+1600] for i in range(0, len(resumen), 1600)]:
-                                        enviar_mensaje_texto(remitente, parte)
-                                else:
-                                    enviar_mensaje_texto(remitente, f"📄 *RESUMEN*\n\n{resumen}")
-                            else:
-                                enviar_mensaje_texto(remitente, "❌ No se pudo extraer texto del PDF")
-                            threading.Thread(target=programar_borrado, args=(temp_path,)).start()
-                            del sesiones[remitente]
-                        elif cuerpo == '3':
-                            enviar_mensaje_texto(remitente, "🌐 *Traducción del documento*\n\n¿A qué idioma?\n\n🇬🇧 *1* → Inglés\n🇫🇷 *2* → Francés")
-                            sesion['estado'] = 'esperando_idioma'
-                        elif cuerpo == '1':
-                            enviar_mensaje_texto(remitente, "⏳ Convirtiendo a Word...")
-                            threading.Thread(target=procesar_y_convertir, args=(
-                                sesion['file_url'], sesion['filename'], 'pdf', 'docx', '.docx', 'application/pdf', remitente
-                            )).start()
-                            del sesiones[remitente]
+                # Esperando opción para archivo que NO es PDF
+                if estado == 'esperando_opcion_normal':
+                    if cuerpo == '1':
+                        enviar_mensaje_texto(remitente, "⏳ Convirtiendo a PDF...")
+                        threading.Thread(target=procesar_y_convertir, args=(
+                            sesion['file_url'], sesion['filename'], 
+                            sesion['input_format'], 'pdf', '.pdf', 
+                            sesion['mime_type'], remitente
+                        )).start()
+                        del sesiones[remitente]
                     else:
-                        enviar_mensaje_texto(remitente, "⚠️ Responde *1* (Word), *2* (Resumen) o *3* (Traducir)")
-                
+                        enviar_mensaje_texto(remitente, "⚠️ Responde *1* para convertir a PDF")
+                        return "OK", 200
+
+                # Esperando opción para PDF
+                elif estado == 'esperando_opcion_pdf':
+                    if cuerpo == '1':
+                        enviar_mensaje_texto(remitente, "⏳ Convirtiendo a Word...")
+                        threading.Thread(target=procesar_y_convertir, args=(
+                            sesion['file_url'], sesion['filename'], 
+                            'pdf', 'docx', '.docx', 'application/pdf', remitente
+                        )).start()
+                        del sesiones[remitente]
+                    elif cuerpo == '2':
+                        enviar_mensaje_texto(remitente, "📝 *Resumen del documento*\n\n⏳ Procesando...")
+                        r = requests.get(sesion['file_url'], headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
+                        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{remitente}.pdf")
+                        with open(temp_path, 'wb') as f:
+                            f.write(r.content)
+                        texto = extraer_texto_pdf(temp_path)
+                        if texto:
+                            resumen = resumir_con_gemini(texto)
+                            if len(resumen) > 1600:
+                                for parte in [resumen[i:i+1600] for i in range(0, len(resumen), 1600)]:
+                                    enviar_mensaje_texto(remitente, parte)
+                            else:
+                                enviar_mensaje_texto(remitente, f"📄 *RESUMEN*\n\n{resumen}")
+                        else:
+                            enviar_mensaje_texto(remitente, "❌ No se pudo extraer texto del PDF")
+                        threading.Thread(target=programar_borrado, args=(temp_path,)).start()
+                        del sesiones[remitente]
+                    elif cuerpo == '3':
+                        enviar_mensaje_texto(remitente, "🌐 *Traducción*\n\n¿A qué idioma?\n\n🇬🇧 *1* → Inglés\n🇫🇷 *2* → Francés")
+                        sesion['estado'] = 'esperando_idioma'
+                    else:
+                        enviar_mensaje_texto(remitente, "⚠️ Opciones: *1* Word, *2* Resumen, *3* Traducir")
+                        return "OK", 200
+
                 # Esperando idioma para traducción
                 elif estado == 'esperando_idioma':
                     if cuerpo in ['1', '2']:
-                        enviar_mensaje_texto(remitente, "🌐 *Traduciendo documento...* ⏳")
+                        enviar_mensaje_texto(remitente, "🌐 *Traduciendo...* ⏳")
                         r = requests.get(sesion['file_url'], headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
                         temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{remitente}.pdf")
                         with open(temp_path, 'wb') as f:
@@ -272,11 +282,11 @@ def recibir_notificacion():
                         texto = extraer_texto_pdf(temp_path)
                         if texto:
                             traduccion = traducir_con_gemini(texto, cuerpo)
+                            idioma_nombre = "Inglés" if cuerpo == '1' else "Francés"
                             if len(traduccion) > 1600:
                                 for parte in [traduccion[i:i+1600] for i in range(0, len(traduccion), 1600)]:
                                     enviar_mensaje_texto(remitente, parte)
                             else:
-                                idioma_nombre = "Inglés" if cuerpo == '1' else "Francés"
                                 enviar_mensaje_texto(remitente, f"🌐 *TRADUCCIÓN A {idioma_nombre}*\n\n{traduccion}")
                         else:
                             enviar_mensaje_texto(remitente, "❌ No se pudo extraer texto del PDF")
@@ -289,24 +299,35 @@ def recibir_notificacion():
             else:
                 enviar_mensaje_texto(remitente, MENSAJE_BIENVENIDA)
 
-        # --- DOCUMENTO ---
-        elif 'document' in mensaje:
-            doc = mensaje['document']
-            filename = doc.get('filename', 'archivo')
-            ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+        # --- DOCUMENTO O IMAGEN ---
+        elif 'document' in mensaje or 'image' in mensaje:
+            es_imagen = 'image' in mensaje
+            if es_imagen:
+                media = mensaje['image']
+                filename = f"imagen_{media['id']}.jpg"
+                ext = 'jpg'
+                mime_type = 'image/jpeg'
+            else:
+                media = mensaje['document']
+                filename = media.get('filename', 'archivo')
+                ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+                mime_type = "application/octet-stream"
 
+            print(f"📄 Archivo: {filename} (ext: {ext})")
+
+            # Obtener URL del archivo desde Meta
             file_data = requests.get(
-                f"https://graph.facebook.com/v18.0/{doc['id']}",
+                f"https://graph.facebook.com/v18.0/{media['id']}",
                 headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}
             ).json()
 
             if 'url' not in file_data:
-                enviar_mensaje_texto(remitente, "❌ No se pudo obtener el archivo")
+                enviar_mensaje_texto(remitente, "❌ No se pudo obtener el archivo. Intenta de nuevo.")
                 return "OK", 200
 
-            # Si es PDF y hay IA disponible
+            # --- CASO 1: ARCHIVO PDF (con IA) ---
             if ext == 'pdf' and gemini_model:
-                enviar_mensaje_texto(remitente, 
+                enviar_mensaje_texto(remitente,
                     "📄 *PDF recibido*\n\n"
                     "¿Qué quieres hacer?\n\n"
                     "📎 *1* → Convertir a Word\n"
@@ -318,15 +339,46 @@ def recibir_notificacion():
                     'file_url': file_data['url'],
                     'filename': filename
                 }
-            elif ext in CONVERSIONES:
-                conv = CONVERSIONES[ext][0]
-                input_f, output_f, ext_sal, label, mime = conv
-                enviar_mensaje_texto(remitente, f"⏳ Convirtiendo a {label}...")
-                threading.Thread(target=procesar_y_convertir, args=(
-                    file_data['url'], filename, input_f, output_f, ext_sal, mime, remitente
-                )).start()
+
+            # --- CASO 2: ARCHIVO PDF (sin IA) ---
+            elif ext == 'pdf' and not gemini_model:
+                enviar_mensaje_texto(remitente,
+                    "📄 *PDF recibido*\n\n"
+                    "¿Qué quieres hacer?\n\n"
+                    "📎 *1* → Convertir a Word\n\n"
+                    "Responde con el número")
+                sesiones[remitente] = {
+                    'estado': 'esperando_opcion_pdf',
+                    'file_url': file_data['url'],
+                    'filename': filename
+                }
+
+            # --- CASO 3: OTROS FORMATOS (DOCX, XLSX, JPG, PNG) ---
+            elif ext in CONVERSIONES and ext != 'pdf':
+                # Obtener el formato de entrada y MIME type correcto
+                input_format = ext
+                if ext in ['jpg', 'jpeg', 'png']:
+                    mime_type = f'image/{ext}'
+                elif ext == 'docx':
+                    mime_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                elif ext == 'xlsx':
+                    mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                
+                enviar_mensaje_texto(remitente,
+                    f"📂 *Archivo recibido:* {filename}\n\n"
+                    "¿Qué quieres hacer?\n\n"
+                    "📎 *1* → Convertir a PDF\n\n"
+                    "Responde con el número")
+                sesiones[remitente] = {
+                    'estado': 'esperando_opcion_normal',
+                    'file_url': file_data['url'],
+                    'filename': filename,
+                    'input_format': input_format,
+                    'mime_type': mime_type
+                }
+
             else:
-                enviar_mensaje_texto(remitente, f"⚠️ Formato .{ext} no soportado")
+                enviar_mensaje_texto(remitente, f"⚠️ Formato *.{ext}* no soportado.\n\nAcepto: DOCX, XLSX, PDF, JPG, PNG")
 
     except Exception as e:
         print(f"❌ Error: {e}")
