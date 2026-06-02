@@ -1,235 +1,198 @@
 import os
 import time
 import threading
+import unicodedata
 import requests
+import google.generativeai as genai
+import PyPDF2
 from flask import Flask, request, send_from_directory
 
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN DE VARIABLES ---
 ACCESS_TOKEN = os.environ.get("WHATSAPP_TOKEN")
-PHONE_ID = os.environ.get("PHONE_NUMBER_ID")
+PHONE_ID     = os.environ.get("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
-CC_API_KEY = os.environ.get("CLOUD_CONVERT_API_KEY")
-BASE_URL = os.environ.get("BASE_URL", "https://bot-whatsapp-zcek.onrender.com")
+CC_API_KEY   = os.environ.get("CLOUD_CONVERT_API_KEY")
+BASE_URL     = os.environ.get("BASE_URL", "https://bot-whatsapp-zcek.onrender.com")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# --- LÍMITES Y RUTAS ---
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+# --- CONFIGURAR GEMINI IA ---
+gemini_model = None
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+        print("🤖 Gemini IA configurada correctamente")
+    except Exception as e:
+        print(f"⚠️ Error configurando Gemini: {e}")
+else:
+    print("⚠️ GEMINI_API_KEY no configurada")
+
+# --- RUTAS ---
 UPLOAD_FOLDER = '/tmp/archivos_bot'
-
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
+# --- ESTADO POR USUARIO ---
+sesiones = {}
+
+# --- CONVERSIONES SOPORTADAS ---
+CONVERSIONES = {
+    "docx": [("docx", "pdf", ".pdf", "PDF", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")],
+    "xlsx": [("xlsx", "pdf", ".pdf", "PDF", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")],
+    "pdf":  [("pdf", "docx", ".docx", "Word (DOCX)", "application/pdf")],
+    "jpg":  [("jpg", "pdf", ".pdf", "PDF", "image/jpeg")],
+    "jpeg": [("jpeg", "pdf", ".pdf", "PDF", "image/jpeg")],
+    "png":  [("png", "pdf", ".pdf", "PDF", "image/png")],
+}
+
+MENSAJE_BIENVENIDA = (
+    "🤖 *¡Hola! Soy PDFMagic Bot*\n\n"
+    "Puedo hacer lo siguiente:\n\n"
+    "📄 *DOCX* → PDF\n"
+    "📊 *XLSX* → PDF\n"
+    "🖼️ *JPG/PNG* → PDF\n"
+    "📑 *PDF* → Word (DOCX)\n"
+    "🤖 *PDF* → Resumir con IA\n"
+    "📝 *PDF* → Extraer texto\n\n"
+    "Envía un archivo y te ayudo."
+)
+
+# ─────────────────────────────────────────
+# UTILIDADES
+# ─────────────────────────────────────────
+
+def sanitizar_nombre(nombre):
+    n = unicodedata.normalize('NFKD', nombre)
+    n = n.encode('ascii', 'ignore').decode('ascii')
+    return n.replace(' ', '_')
 
 def programar_borrado(ruta):
-    """Espera 5 minutos y elimina el archivo del servidor"""
-    time.sleep(300)
+    time.sleep(600)
     if os.path.exists(ruta):
         os.remove(ruta)
-        print(f"🧹 Limpieza automática: {ruta} eliminado.")
-
+        print(f"🧹 Limpieza: {ruta} eliminado.")
 
 def enviar_mensaje_texto(receptor, texto):
-    """Envía una respuesta rápida de texto vía API de Meta"""
     url = f"https://graph.facebook.com/v18.0/{PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": receptor,
-        "type": "text",
-        "text": {"body": texto}
-    }
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": receptor, "type": "text", "text": {"body": texto}}
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        print(f"📤 Mensaje enviado a {receptor}: {response.status_code}")
-        if response.status_code != 200:
-            print(f"Error respuesta: {response.text}")
+        r = requests.post(url, headers=headers, json=payload)
+        print(f"📤 Mensaje a {receptor}: {r.status_code}")
     except Exception as e:
-        print(f"❌ Error al enviar mensaje: {e}")
+        print(f"❌ Error: {e}")
 
-
-def procesar_y_convertir(file_url, nombre_original, telefono):
-    """Descarga de Meta, convierte en CloudConvert y programa limpieza"""
+def extraer_texto_pdf(pdf_path):
+    """Extrae texto de un PDF"""
+    texto = ""
     try:
-        # 1. Sanitizar nombre: eliminar acentos y reemplazar espacios por guiones bajos
-        import unicodedata
-        nombre_seguro = unicodedata.normalize('NFKD', nombre_original)
-        nombre_seguro = nombre_seguro.encode('ascii', 'ignore').decode('ascii')
-        nombre_seguro = nombre_seguro.replace(' ', '_')
-        print(f"📝 Nombre original: {nombre_original} → seguro: {nombre_seguro}")
+        with open(pdf_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    texto += page_text + "\n"
+        return texto if texto.strip() else None
+    except Exception as e:
+        print(f"❌ Error extrayendo texto: {e}")
+        return None
 
-        # Descargar el archivo desde los servidores de Meta
+def resumir_con_gemini(texto):
+    """Resume texto usando Gemini"""
+    if not gemini_model:
+        return "❌ IA no disponible"
+    
+    if len(texto) > 8000:
+        texto = texto[:8000]
+    
+    prompt = f"Resume el siguiente texto de forma clara y concisa:\n\n{texto}\n\nResumen:"
+    try:
+        respuesta = gemini_model.generate_content(prompt)
+        return respuesta.text
+    except Exception as e:
+        return f"❌ Error: {str(e)[:100]}"
+
+# ─────────────────────────────────────────
+# CONVERSIÓN CLOUDCONVERT
+# ─────────────────────────────────────────
+
+def procesar_y_convertir(file_url, nombre_original, input_format, output_format, ext_salida, mime_type, telefono):
+    """Convierte archivo con CloudConvert"""
+    try:
+        nombre_seguro = sanitizar_nombre(nombre_original)
         r = requests.get(file_url, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
         input_path = os.path.join(UPLOAD_FOLDER, nombre_seguro)
         with open(input_path, 'wb') as f:
             f.write(r.content)
-        print(f"📥 Archivo descargado: {nombre_seguro}")
+        print(f"📥 Descargado: {nombre_seguro}")
 
-        # 2. Configurar headers para CloudConvert
-        headers = {
-            "Authorization": f"Bearer {CC_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        # 3. Crear el job con las tareas
+        cc_headers = {"Authorization": f"Bearer {CC_API_KEY}", "Content-Type": "application/json"}
         job_data = {
             "tasks": {
-                "upload": {
-                    "operation": "import/upload"
-                },
-                "convert": {
-                    "operation": "convert",
-                    "input": ["upload"],
-                    "input_format": "docx",
-                    "output_format": "pdf"
-                },
-                "export": {
-                    "operation": "export/url",
-                    "input": ["convert"]
-                }
+                "upload": {"operation": "import/upload"},
+                "convert": {"operation": "convert", "input": ["upload"], "input_format": input_format, "output_format": output_format},
+                "export": {"operation": "export/url", "input": ["convert"]}
             }
         }
 
-        print("📦 Creando job en CloudConvert...")
-        response = requests.post(
-            "https://api.cloudconvert.com/v2/jobs",
-            json=job_data,
-            headers=headers
-        )
-        print(f"📥 Respuesta CloudConvert status: {response.status_code}")
+        resp = requests.post("https://api.cloudconvert.com/v2/jobs", json=job_data, headers=cc_headers)
+        if resp.status_code != 201:
+            raise Exception(f"Error crear job: {resp.text}")
 
-        if response.status_code != 201:
-            raise Exception(f"Error al crear job: {response.text}")
-
-        job = response.json()
-        print(f"📋 Job response: {job}")
-
-        # Extraer job ID
+        job = resp.json()
         job_id = job.get('data', {}).get('id')
         if not job_id:
-            raise Exception(f"No se pudo extraer job_id. Respuesta: {job}")
-        print(f"✅ Job ID: {job_id}")
+            raise Exception("No job_id")
 
-        # Obtener la tarea de import/upload
-        tasks_list = job.get('data', {}).get('tasks', [])
-        upload_task = next(
-            (t for t in tasks_list if t.get('operation') == 'import/upload'),
-            None
-        )
-
+        tasks = job.get('data', {}).get('tasks', [])
+        upload_task = next((t for t in tasks if t.get('operation') == 'import/upload'), None)
         if not upload_task:
-            raise Exception("No se encontró la tarea de import/upload")
+            raise Exception("No upload task")
 
-        # ✅ CORRECCIÓN PRINCIPAL:
-        # La URL está en result.form.url (NO en result.url)
-        # Los parámetros están en result.form.parameters (NO en result.form)
-        result = upload_task.get('result', {})
-        form_data = result.get('form', {})
+        form_data = upload_task.get('result', {}).get('form', {})
         upload_url = form_data.get('url')
         form_params = form_data.get('parameters', {})
 
-        if not upload_url:
-            raise Exception(f"No se pudo encontrar la URL de subida. result={result}")
-
-        print(f"📤 URL de subida: {upload_url}")
-        print(f"📋 Parámetros del formulario: {form_params}")
-
-        # 4. Construir parámetros y reemplazar ${filename} en el campo key
-        data_params = {}
-        for key, value in form_params.items():
-            if key == 'key':
-                value = value.replace('${filename}', nombre_seguro)
-            data_params[key] = value
+        data_params = {k: v.replace('${filename}', nombre_seguro) if k == 'key' else v for k, v in form_params.items()}
 
         with open(input_path, 'rb') as f:
-            file_content = f.read()
+            up_resp = requests.post(upload_url, data=data_params, files={'file': (nombre_seguro, f.read(), mime_type)})
 
-        upload_response = requests.post(
-            upload_url,
-            data=data_params,
-            files={
-                'file': (
-                    nombre_seguro,
-                    file_content,
-                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                )
-            }
-        )
-
-        print(f"📥 Respuesta subida: {upload_response.status_code}")
-        print(f"📥 Respuesta texto: {upload_response.text[:500]}")
-
-        if upload_response.status_code not in [200, 201, 204]:
-            raise Exception(f"Error al subir archivo: {upload_response.status_code} - {upload_response.text[:200]}")
-
-        print("✅ Archivo subido exitosamente")
-
-        # 5. Esperar a que termine la conversión (polling)
-        print("🔄 Convirtiendo archivo... (esto puede tomar un minuto)")
-        poll_headers = {"Authorization": f"Bearer {CC_API_KEY}"}
+        if up_resp.status_code not in [200, 201, 204]:
+            raise Exception(f"Error subida: {up_resp.status_code}")
 
         for i in range(90):
             time.sleep(2)
-
-            status_response = requests.get(
-                f"https://api.cloudconvert.com/v2/jobs/{job_id}",
-                headers=poll_headers
-            )
-
-            if not status_response.ok:
-                print(f"⚠️ Error al consultar estado: {status_response.status_code}")
+            status_resp = requests.get(f"https://api.cloudconvert.com/v2/jobs/{job_id}", headers={"Authorization": f"Bearer {CC_API_KEY}"})
+            if not status_resp.ok:
                 continue
-
-            job_status = status_response.json()
-            tasks_list = job_status.get('data', {}).get('tasks', [])
-
-            for task in tasks_list:
+            job_status = status_resp.json()
+            for task in job_status.get('data', {}).get('tasks', []):
                 if task.get('operation') == 'export/url' and task.get('status') == 'finished':
-                    files_result = task.get('result', {}).get('files', [])
-                    if files_result and 'url' in files_result[0]:
-                        pdf_url = files_result[0]['url']
-                        pdf_filename = nombre_seguro.rsplit('.', 1)[0] + ".pdf"
-                        pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
-
-                        pdf_response = requests.get(pdf_url)
-                        if pdf_response.status_code == 200:
-                            with open(pdf_path, 'wb') as f:
-                                f.write(pdf_response.content)
-
-                            print(f"✅ Conversión completada: {pdf_filename}")
-                            link = f"{BASE_URL}/download/{pdf_filename}"
-                            enviar_mensaje_texto(
-                                telefono,
-                                f"✅ ¡Conversión lista!\n📄 {pdf_filename}\n🔗 {link}\n⏰ El link expirará en 5 minutos"
-                            )
+                    files = task.get('result', {}).get('files', [])
+                    if files and 'url' in files[0]:
+                        out_url = files[0]['url']
+                        out_filename = nombre_seguro.rsplit('.', 1)[0] + ext_salida
+                        out_path = os.path.join(UPLOAD_FOLDER, out_filename)
+                        out_resp = requests.get(out_url)
+                        if out_resp.status_code == 200:
+                            with open(out_path, 'wb') as f:
+                                f.write(out_resp.content)
+                            link = f"{BASE_URL}/download/{out_filename}"
+                            enviar_mensaje_texto(telefono, f"✅ ¡Conversión lista!\n📄 {out_filename}\n🔗 {link}")
                             threading.Thread(target=programar_borrado, args=(input_path,)).start()
-                            threading.Thread(target=programar_borrado, args=(pdf_path,)).start()
+                            threading.Thread(target=programar_borrado, args=(out_path,)).start()
                             return
-
-            # Verificar si el job falló
-            job_overall_status = job_status.get('data', {}).get('status')
-            if job_overall_status == 'error':
-                error_task = next(
-                    (t for t in tasks_list if t.get('status') == 'error'),
-                    None
-                )
-                error_msg = error_task.get('message', 'Error desconocido') if error_task else 'Error desconocido'
-                raise Exception(f"CloudConvert reportó error: {error_msg}")
-
-            if i % 10 == 0:
-                print(f"⏳ Esperando conversión... ({i * 2} segundos)")
-
-        raise Exception("Tiempo de espera agotado para la conversión")
-
+        raise Exception("Tiempo agotado")
     except Exception as e:
-        print(f"❌ Error en conversión: {e}")
-        import traceback
-        traceback.print_exc()
-        enviar_mensaje_texto(telefono, f"❌ Error al convertir: {str(e)[:150]}")
+        print(f"❌ Error: {e}")
+        enviar_mensaje_texto(telefono, f"❌ Error: {str(e)[:150]}")
 
+# ─────────────────────────────────────────
+# WEBHOOK
+# ─────────────────────────────────────────
 
 @app.route('/webhook', methods=['GET'])
 def verificar_token():
@@ -237,89 +200,133 @@ def verificar_token():
         return request.args.get("hub.challenge"), 200
     return "Error de validación", 403
 
-
 @app.route('/webhook', methods=['POST'])
 def recibir_notificacion():
     data = request.get_json()
-    print("=== 📩 Webhook recibido ===")
+    print("=== 📩 Webhook ===")
 
     try:
         entry = data['entry'][0]['changes'][0]['value']
+        if 'messages' not in entry:
+            return "OK", 200
 
-        if 'messages' in entry:
-            mensaje = entry['messages'][0]
-            remitente = mensaje['from']
-            print(f"📱 Mensaje de: {remitente}")
+        mensaje = entry['messages'][0]
+        remitente = mensaje['from']
+        print(f"📱 De: {remitente}")
 
-            if 'text' in mensaje:
-                cuerpo = mensaje['text']['body']
-                print(f"💬 Texto: {cuerpo}")
-                enviar_mensaje_texto(
-                    remitente,
-                    "🤖 *¡Hola! Soy tu bot conversor PDFMagic*\n\n"
-                    "📄 Envíame cualquier archivo WORD (.docx) y lo convertiré automáticamente a PDF.\n\n"
-                    "⚡ Sin registros, sin clics, sin complicaciones."
-                )
+        # --- SI ES TEXTO ---
+        if 'text' in mensaje:
+            cuerpo = mensaje['text']['body'].strip()
+            print(f"💬 Texto: {cuerpo}")
 
-            elif 'document' in mensaje:
-                doc = mensaje['document']
-                filename = doc.get('filename', 'documento.docx')
-                print(f"📄 Documento recibido: {filename}")
-
-                # Verificar que sea un .docx
-                if not filename.lower().endswith('.docx'):
-                    enviar_mensaje_texto(
-                        remitente,
-                        "⚠️ Solo acepto archivos WORD (.docx). Por favor envía un archivo con esa extensión."
-                    )
-                    return "OK", 200
-
-                # Obtener URL del archivo desde la API de Meta
-                file_data = requests.get(
-                    f"https://graph.facebook.com/v18.0/{doc['id']}",
-                    headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}
-                ).json()
-
-                if 'url' in file_data:
-                    enviar_mensaje_texto(remitente, "⏳ ¡Recibido! Estoy convirtiendo tu archivo a PDF... 🔄")
-                    threading.Thread(
-                        target=procesar_y_convertir,
-                        args=(file_data['url'], filename, remitente)
-                    ).start()
+            # Si está esperando respuesta de IA
+            if remitente in sesiones and sesiones[remitente].get('esperando') == 'opcion_ia':
+                if cuerpo in ['1', '2', '3']:
+                    sesion = sesiones[remitente]
+                    enviar_mensaje_texto(remitente, "⏳ Procesando...")
+                    
+                    if cuerpo == '1':
+                        # Convertir a Word
+                        threading.Thread(target=procesar_y_convertir, args=(
+                            sesion['file_url'], sesion['filename'], 'pdf', 'docx', '.docx', 'application/pdf', remitente
+                        )).start()
+                    elif cuerpo == '2':
+                        # Resumir con IA
+                        r = requests.get(sesion['file_url'], headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
+                        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{remitente}.pdf")
+                        with open(temp_path, 'wb') as f:
+                            f.write(r.content)
+                        texto = extraer_texto_pdf(temp_path)
+                        if texto:
+                            resumen = resumir_con_gemini(texto)
+                            if len(resumen) > 1600:
+                                for parte in [resumen[i:i+1600] for i in range(0, len(resumen), 1600)]:
+                                    enviar_mensaje_texto(remitente, parte)
+                            else:
+                                enviar_mensaje_texto(remitente, f"📄 *RESUMEN*\n\n{resumen}")
+                        else:
+                            enviar_mensaje_texto(remitente, "❌ No se pudo extraer texto del PDF")
+                        threading.Thread(target=programar_borrado, args=(temp_path,)).start()
+                    elif cuerpo == '3':
+                        # Extraer texto
+                        r = requests.get(sesion['file_url'], headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
+                        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{remitente}.pdf")
+                        with open(temp_path, 'wb') as f:
+                            f.write(r.content)
+                        texto = extraer_texto_pdf(temp_path)
+                        if texto:
+                            if len(texto) > 1500:
+                                texto = texto[:1500] + "\n\n[texto truncado]"
+                            enviar_mensaje_texto(remitente, f"📄 *TEXTO EXTRAÍDO*\n\n{texto}")
+                        else:
+                            enviar_mensaje_texto(remitente, "❌ No se pudo extraer texto")
+                        threading.Thread(target=programar_borrado, args=(temp_path,)).start()
+                    
+                    del sesiones[remitente]
                 else:
-                    print(f"❌ Respuesta de Meta sin URL: {file_data}")
-                    enviar_mensaje_texto(remitente, "❌ No se pudo obtener el archivo. Intenta de nuevo.")
+                    enviar_mensaje_texto(remitente, "⚠️ Responde con *1*, *2* o *3*")
+                return "OK", 200
+            else:
+                enviar_mensaje_texto(remitente, MENSAJE_BIENVENIDA)
+
+        # --- SI ES DOCUMENTO ---
+        elif 'document' in mensaje:
+            doc = mensaje['document']
+            filename = doc.get('filename', 'archivo')
+            ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+
+            # Obtener URL del archivo
+            file_data = requests.get(
+                f"https://graph.facebook.com/v18.0/{doc['id']}",
+                headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}
+            ).json()
+
+            if 'url' not in file_data:
+                enviar_mensaje_texto(remitente, "❌ No se pudo obtener el archivo")
+                return "OK", 200
+
+            # Si es PDF, preguntar qué hacer
+            if ext == 'pdf':
+                enviar_mensaje_texto(remitente, 
+                    "📄 *PDF recibido*\n\n"
+                    "¿Qué quieres hacer?\n\n"
+                    "📎 *1* → Convertir a Word\n"
+                    "🤖 *2* → Resumir con IA\n"
+                    "📝 *3* → Extraer texto\n\n"
+                    "Responde con el número"
+                )
+                sesiones[remitente] = {
+                    'esperando': 'opcion_ia',
+                    'file_url': file_data['url'],
+                    'filename': filename
+                }
+                return "OK", 200
+
+            # Si no es PDF, convertir directamente
+            if ext in CONVERSIONES:
+                conv = CONVERSIONES[ext][0]
+                input_f, output_f, ext_sal, label, mime = conv
+                enviar_mensaje_texto(remitente, f"⏳ Convirtiendo a {label}...")
+                threading.Thread(target=procesar_y_convertir, args=(
+                    file_data['url'], filename, input_f, output_f, ext_sal, mime, remitente
+                )).start()
+            else:
+                enviar_mensaje_texto(remitente, f"⚠️ Formato .{ext} no soportado")
 
     except Exception as e:
-        print(f"❌ Error en webhook: {e}")
+        print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
 
     return "OK", 200
 
-
 @app.route('/download/<filename>')
 def descargar_archivo(filename):
-    ruta_completa = os.path.join(UPLOAD_FOLDER, filename)
-    print(f"📂 Solicitud de descarga: {filename}")
-    print(f"📂 Ruta completa: {ruta_completa}")
-    print(f"📂 ¿Existe el archivo? {os.path.exists(ruta_completa)}")
-    print(f"📂 Archivos en carpeta: {os.listdir(UPLOAD_FOLDER)}")
-
-    if not os.path.exists(ruta_completa):
-        return f"❌ Archivo no encontrado: {filename}", 404
-
-    return send_from_directory(
-        os.path.abspath(UPLOAD_FOLDER),
-        filename,
-        as_attachment=True
-    )
-
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
 @app.route('/')
 def home():
-    return "🤖 Bot de WhatsApp funcionando. Webhook en /webhook"
-
+    return "🤖 PDFMagic Bot funcionando"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
